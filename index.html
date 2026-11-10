@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="onde: never-ending ambient, a little sad, generated live in your browser. It never plays the same way twice.">
+<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>onde</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500&display=swap">
+<style>
+/* Layout: one quiet column, like sempre, lamiera, deriva and nebbia. The porthole is the whole instrument: each line in it is a voice of the piece, tap it to start and stop */
+:root{
+  --bg:#02040F; --ink:#E5DADA; --mute:#968E96; --line:#152139; --amber:#E59500; --wine:#D2577F; --night:#4A8CC4;
+  --font:"Helvetica Neue","IBM Plex Sans",Helvetica,Arial,sans-serif;
+  color-scheme:dark;
+}
+html,body{background:var(--bg)}
+body{color:var(--ink);font-family:var(--font);font-weight:400;font-size:16px;line-height:1.4;font-variant-numeric:tabular-nums;
+  padding-left:max(18px,env(safe-area-inset-left,0px));padding-right:max(18px,env(safe-area-inset-right,0px));padding-block:16px 28px}
+.wrap{max-width:540px;margin:0 auto;display:flex;flex-direction:column;gap:22px;position:relative;z-index:1}
+#room{position:fixed;left:0;bottom:0;width:100%;pointer-events:none;z-index:0;display:block}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+
+header{display:flex;justify-content:space-between;align-items:baseline}
+h1{font-weight:300;font-size:1.5rem;letter-spacing:-.01em;margin:0}
+.titleblock{display:flex;flex-direction:column;gap:2px}
+.tag{font-size:.78rem;color:var(--mute);letter-spacing:.02em}
+#clock{color:var(--mute);font-size:.95rem}
+
+.stage{display:block;width:100%;max-width:min(100%,58vh);aspect-ratio:1;margin:0 auto;position:relative;border-radius:50%;
+  -webkit-tap-highlight-color:transparent}
+.stage:focus-visible{outline:1px solid var(--amber);outline-offset:3px}
+.stage canvas{display:block;width:100%;height:100%}
+#tap{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-weight:300;font-size:1.9rem;letter-spacing:-.02em;
+  color:var(--mute);pointer-events:none}
+
+.cap{display:flex;flex-direction:column;align-items:center;gap:2px;margin-top:-6px;text-align:center;min-height:5.2rem}
+#nowA{font-weight:300;font-size:1.9rem;letter-spacing:-.02em}
+#nowB{color:var(--mute);font-size:.92rem;text-transform:lowercase}
+.hint{font-size:.88rem;color:var(--mute);margin:10px auto 0;max-width:40ch;text-align:center}
+.foot{display:flex;justify-content:center;gap:10px;padding:10px 16px 0;font-size:.8rem;letter-spacing:.04em;color:var(--mute)}
+.foot a{color:inherit;text-decoration:none;border-bottom:1px solid transparent;padding-bottom:1px}
+.foot a:hover,.foot a:focus-visible{color:var(--amber);border-bottom-color:currentColor;outline:none}
+</style>
+
+</head>
+<body>
+<canvas id="room" aria-hidden="true"></canvas>
+<div class="wrap">
+  <header>
+    <div class="titleblock">
+      <h1>onde</h1>
+      <span class="tag">never-ending ambient, a little sad</span>
+    </div>
+    <span id="clock" hidden>00:00:00</span>
+  </header>
+
+  <button class="stage" id="toggle" type="button" aria-pressed="false" aria-label="Start">
+    <canvas id="dial" aria-hidden="true"></canvas>
+    <span id="tap">tap</span>
+  </button>
+
+  <div class="cap">
+    <span id="nowA" hidden>f min</span>
+    <span id="nowB" hidden>piece 1, bar 1 of 96 at 56 bpm</span>
+    <p class="hint" id="hint">Tap the circle. Slow, dark ambient starts, and it never plays the same way twice.</p>
+  </div>
+
+  <footer class="foot"><a href="https://github.com/phonk/onde">source on github</a><span aria-hidden="true">·</span><a href="https://phonk.github.io/">phonk</a></footer>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const pick = a => a[Math.floor(Math.random() * a.length)];
+  const chance = p => Math.random() < p;
+  const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+  const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+  const KEYS = ['c', 'c♯', 'd', 'e♭', 'e', 'f', 'f♯', 'g', 'a♭', 'a', 'b♭', 'b'];
+  /* everything is counted from the root of a minor key, in semitones */
+  const VOICINGS = [[0, 7, 15, 22], [0, 7, 10, 15], [-12, 0, 7, 15], [0, 7, 15, 19]];
+  const MELS = [[14, 15], [14, 15, 14, 12], [10, 8], [19, 20, 19, 17], [14, 14, 15, 12]];   /* one voice that moves, very slowly */
+  const BASS = [[0, 0, -4, -4], [0, 0, 0, -4, 0, 0, -2, -2], [0, -4, -7, -2], [0, 0, -7, -7], [0, 0, 0, 0], [0, 0, -4, -2]];   /* the chord stays, the floor moves under it */
+  const SUBPATS = [
+    [1, 0, 0, 0, .6, 0, 0, 0, .8, 0, 0, 0, .6, 0, 0, 0],
+    [1, 0, .5, 0, .7, 0, .5, 0, .9, 0, .5, 0, .7, 0, .5, 0],
+    [1, 0, 0, .5, 0, 0, .7, 0, 0, 0, .6, 0, 0, .5, 0, 0],
+    [1, 0, 0, 0, 0, 0, .6, 0, .8, 0, 0, 0, 0, 0, .5, 0]
+  ];
+
+  let ac = null, mix, master, tape, bed, noiseBuf, crackleBuf, irBuf;
+  let decks = [], cur = 0, curL = 96, curT = 16, pieceNo = 0;
+  let step = 0, nextTime = 0, baseBpm = 56, t0 = 0, bpmNow = 56;
+  let playing = false, worker = null, fallbackTimer = null, silentEl = null;
+  const events = [];
+
+  /* ---------- raw material ---------- */
+  function makeNoise(seconds) {
+    const b = ac.createBuffer(1, ac.sampleRate * seconds, ac.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    return b;
+  }
+  function makeCrackle(seconds) {
+    const b = ac.createBuffer(1, ac.sampleRate * seconds, ac.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() < 0.00035 ? (Math.random() * 2 - 1) : 0;
+    return b;
+  }
+  function makeImpulse(seconds) {
+    const sr = ac.sampleRate, n = Math.floor(sr * seconds), b = ac.createBuffer(2, n, sr);
+    for (let c = 0; c < 2; c++) {
+      const d = b.getChannelData(c); let y = 0;
+      for (let i = Math.floor(sr * 0.02); i < n; i++) {
+        const t = i / sr, x = (Math.random() * 2 - 1) * Math.exp(-t * 0.72);
+        const a = 0.4 * Math.exp(-t * 0.6) + 0.04;   /* the tail gets darker as it dies */
+        y += a * (x - y); d[i] = y;
+      }
+    }
+    return b;
+  }
+  function tanhCurve(k, out) {
+    const c = new Float32Array(1025);
+    for (let i = 0; i < 1025; i++) c[i] = Math.tanh((i / 512 - 1) * k) * out;
+    return c;
+  }
+
+  /* ---------- a deck: one piece, with its own echo and room ---------- */
+  class Deck {
+    constructor(i) {
+      this.i = i;
+      const g = v => { const n = ac.createGain(); n.gain.value = v; return n; };
+      const bq = (type, f, q) => { const n = ac.createBiquadFilter(); n.type = type; n.frequency.value = f; n.Q.value = q; return n; };
+      this.g = g; this.bq = bq;
+      this.out = g(0); this.lp = bq('lowpass', 16000, 0.5); this.pre = g(1);
+      this.pre.connect(this.lp); this.lp.connect(this.out); this.out.connect(mix);
+      this.duck = g(1); this.duck.connect(this.pre);
+
+      /* pads go through a wobbling tape before anything else */
+      this.padBus = g(1);
+      this.warb = ac.createDelay(0.2); this.warb.delayTime.value = 0.03;
+      [[rnd(0.3, 0.5), 0.0022], [rnd(0.06, 0.11), 0.005], [rnd(5.5, 7.5), 0.00005]].forEach(([f, d]) => {
+        const o = ac.createOscillator(), og = g(d); o.frequency.value = f; o.connect(og); og.connect(this.warb.delayTime); o.start();
+      });
+      this.padBus.connect(this.warb); this.warb.connect(this.duck);
+
+      this.subBus = g(0.5); this.subBus.connect(this.pre);
+      this.pluckBus = g(1); this.pluckBus.connect(this.duck);
+      this.pingBus = g(1); { const d = g(0.5); this.pingBus.connect(d); d.connect(this.pre); }
+
+      this.delay = ac.createDelay(4);
+      this.delaySend = g(1);
+      this.fb = g(0.5);
+      const fbHP = bq('highpass', 240, -3); this.fbLP = bq('lowpass', 2000, -3);
+      const sat = ac.createWaveShaper(); sat.curve = tanhCurve(2, 0.9);
+      const delayOut = g(0.7);
+      this.pan = ac.createStereoPanner ? ac.createStereoPanner() : g(1);
+      this.delaySend.connect(this.delay);
+      this.delay.connect(fbHP); fbHP.connect(this.fbLP); this.fbLP.connect(this.fb); this.fb.connect(sat); sat.connect(this.delay);
+      this.delay.connect(delayOut); delayOut.connect(this.pan); this.pan.connect(this.duck);
+      if (this.pan.pan) { const o = ac.createOscillator(), og = g(0.6); o.frequency.value = rnd(0.03, 0.07); o.connect(og); og.connect(this.pan.pan); o.start(); }
+      { const d = g(0.7); this.pluckBus.connect(d); d.connect(this.delaySend); }
+      { const d = g(0.8); this.pingBus.connect(d); d.connect(this.delaySend); }
+
+      this.rev = ac.createConvolver(); this.rev.buffer = irBuf;
+      this.revIn = g(1); this.revIn.connect(this.rev);
+      { const o = g(0.6); this.rev.connect(o); o.connect(this.pre); }
+      [[this.warb, 0.45], [this.pluckBus, 0.5], [this.pingBus, 0.9], [this.delay, 0.4]].forEach(([n, v]) => { const s = g(v); n.connect(s); s.connect(this.revIn); });
+
+      this.track = null; this.voices = []; this.live = [];
+    }
+
+    load(tr, bar, t, fadeBars, barDur, first) {
+      this.track = tr; this.startBar = bar; this.bn = null; this.mn = null;
+      this.pulseFrom = bar + (first ? 8 : fadeBars + pick([0, 4, 8])); this.pulseUntil = Infinity;
+      const fade = fadeBars * barDur, o = this.out.gain, f = this.lp.frequency;
+      o.cancelScheduledValues(t); o.setValueAtTime(0.0001, t); o.linearRampToValueAtTime(1, t + fade);
+      f.cancelScheduledValues(t); f.setValueAtTime(300, t); f.exponentialRampToValueAtTime(16000, t + fade);
+      this.delay.delayTime.cancelScheduledValues(t); this.delay.delayTime.setValueAtTime(tr.delaySteps * barDur / 16, t);
+      this.fb.gain.setValueAtTime(tr.fb, t); this.fbLP.frequency.setValueAtTime(tr.fbTone, t);
+      this.startVoices(t);
+    }
+
+    startVoices(t) {
+      const tr = this.track, g = this.g, bq = this.bq;
+      this.voices = []; this.live = [];
+      const notes = tr.voicing.map(n => ({ n, mel: false })).concat([{ n: tr.mel[0], mel: true }]);
+      const lv = 0.21 * tr.padLevel / Math.sqrt(notes.length);
+      /* every voice of the pad swells and fades on its own clock */
+      for (const { n, mel } of notes) {
+        const f = bq('lowpass', tr.padCut * (mel ? 1.5 : 1), 0.7), vg = g(lv * 0.55);
+        const per = rnd(18, 46), ts = t + rnd(0, per * 0.5);
+        const lfo = ac.createOscillator(), lg = g(lv * 0.45); lfo.frequency.value = 1 / per; lfo.connect(lg); lg.connect(vg.gain); lfo.start(ts);
+        const oscs = [-1, 1].map(s => {
+          const o = ac.createOscillator(); o.type = mel && s > 0 ? 'triangle' : 'sawtooth';
+          o.frequency.value = mtof(tr.base + n); o.detune.value = s * rnd(4, 9); o.connect(f); o.start(t); return o;
+        });
+        f.connect(vg); vg.connect(this.padBus);
+        this.voices.push({ n, mel, per, ts, f, oscs });
+        this.live.push(lfo, ...oscs);
+      }
+      /* the floor: a low sine that is always there, and that the pulse pushes */
+      this.sub = ac.createOscillator(); this.sub2 = ac.createOscillator();
+      const s2 = g(0.2), slp = bq('lowpass', 240, 0.5);
+      this.subGain = g(0.1);
+      this.sub.connect(this.subGain); this.sub2.connect(s2); s2.connect(this.subGain); this.subGain.connect(slp); slp.connect(this.subBus);
+      this.sub.start(t); this.sub2.start(t); this.live.push(this.sub, this.sub2);
+      this.subBus.gain.setValueAtTime(0.5 * tr.subLevel, t);
+      /* wind, or water, far away */
+      if (tr.wind) {
+        const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+        const bp = bq('bandpass', tr.windF, 1.5), wg = g(tr.wind * 0.6);
+        const lfo = ac.createOscillator(), lg = g(tr.wind * 0.4); lfo.frequency.value = 1 / rnd(15, 40); lfo.connect(lg); lg.connect(wg.gain);
+        const fl = ac.createOscillator(), flg = g(tr.windF * 0.4); fl.frequency.value = 1 / rnd(20, 50); fl.connect(flg); flg.connect(bp.frequency);
+        src.connect(bp); bp.connect(wg); wg.connect(this.pre); wg.connect(this.revIn);
+        src.start(t, Math.random()); lfo.start(t); fl.start(t); this.live.push(src, lfo, fl);
+      }
+    }
+
+    beginOut(bar, t, fadeBars, barDur) {
+      this.pulseUntil = bar + Math.floor(fadeBars / 4);
+      const d = fadeBars * barDur, o = this.out.gain, f = this.lp.frequency;
+      o.cancelScheduledValues(t); o.setValueAtTime(1, t); o.linearRampToValueAtTime(0.85, t + d * 0.4); o.linearRampToValueAtTime(0.0001, t + d);
+      f.cancelScheduledValues(t); f.setValueAtTime(16000, t); f.exponentialRampToValueAtTime(400, t + d);
+    }
+    end(t) {
+      this.live.forEach(n => { try { n.stop(t + 0.5); } catch (e) {} });
+      this.live = []; this.voices = []; this.track = null;
+    }
+
+    playStep(bar, s, t, sd) {
+      const tr = this.track; if (!tr) return;
+      const rb = bar - this.startBar;
+      if (s === 0) {
+        let bn = tr.bassBase + tr.bass[Math.floor(rb / 4) % tr.bass.length]; if (bn < 29) bn += 12;
+        if (bn !== this.bn) {
+          const first = this.bn === null; this.bn = bn;
+          if (first) { this.sub.frequency.setValueAtTime(mtof(bn), t); this.sub2.frequency.setValueAtTime(mtof(bn + 12), t); }
+          else { this.sub.frequency.setTargetAtTime(mtof(bn), t, 0.15); this.sub2.frequency.setTargetAtTime(mtof(bn + 12), t, 0.15); }
+        }
+        const mn = tr.mel[Math.floor(rb / tr.melBars) % tr.mel.length];
+        if (mn !== this.mn) {
+          this.mn = mn;
+          const v = this.voices.find(x => x.mel);
+          if (v) { v.n = mn; v.oscs.forEach(o => o.frequency.setTargetAtTime(mtof(tr.base + mn), t, 0.35)); }
+        }
+        const drift = Math.pow(2, 0.5 * Math.sin(t / tr.p2) + 0.25 * Math.sin(t / tr.p1 + 1));
+        this.voices.forEach(v => v.f.frequency.setTargetAtTime(tr.padCut * (v.mel ? 1.5 : 1) * drift, t, 1.5));
+        this.delay.delayTime.setTargetAtTime(tr.delaySteps * sd, t, 0.8);
+        this.fbLP.frequency.setTargetAtTime(clamp(tr.fbTone * drift, 700, 3600), t, 1);
+      }
+      const on = tr.hasPulse && bar >= this.pulseFrom && bar < this.pulseUntil && !tr.breaks.has(rb);
+      if (on && tr.subPat[s] > 0) this.pulse(t, tr.subPat[s], tr);
+      if (on && tr.pluck && tr.pluckPat[s] > 0 && chance(0.85)) this.pluck(t, tr.pluckPat[s] * tr.pluck, tr);
+      if (s % 2 === 0 && chance(tr.ping)) this.ping(t, tr);
+      if (tr.tick && chance(tr.tick)) this.tick(t);
+    }
+
+    pulse(t, vel, tr) {
+      const gn = this.subGain.gain;
+      gn.setTargetAtTime(0.1 + 0.8 * vel, t, 0.012); gn.setTargetAtTime(0.1, t + 0.04, tr.subDecay);
+      this.duck.gain.setTargetAtTime(1 - 0.3 * vel, t, 0.01); this.duck.gain.setTargetAtTime(1, t + 0.05, 0.18);
+      if (bed) { bed.gain.setTargetAtTime(1 - 0.4 * vel, t, 0.01); bed.gain.setTargetAtTime(1, t + 0.05, 0.2); }
+      events.push({ t, kind: 'pulse', vel });
+    }
+
+    pluck(t, vel, tr) {
+      const drift = Math.pow(2, 0.8 * Math.sin(t / tr.p1) + 0.4 * Math.sin(t / tr.p2));
+      const cut = clamp(tr.pcut * drift, 160, 2400);
+      const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.Q.value = 2.5;
+      f.frequency.setValueAtTime(cut * 2.2, t); f.frequency.exponentialRampToValueAtTime(cut, t + tr.pdec);
+      const gn = ac.createGain(), end = t + tr.pdec * 4 + 0.2;
+      gn.gain.setValueAtTime(0, t); gn.gain.linearRampToValueAtTime(vel * 0.07, t + 0.008); gn.gain.setTargetAtTime(0, t + 0.015, tr.pdec / 2.5);
+      for (const iv of tr.pluckNotes) for (const d of [-6, 6]) {
+        const o = ac.createOscillator(); o.type = d < 0 ? 'sawtooth' : 'triangle';
+        o.frequency.value = mtof(tr.base + iv); o.detune.value = d; o.connect(f); o.start(t); o.stop(end);
+      }
+      f.connect(gn); gn.connect(this.pluckBus);
+    }
+
+    ping(t, tr) {
+      let m = tr.base + pick(tr.voicing.concat(tr.mel)) + pick([12, 24]); while (m > 86) m -= 12;
+      const o = ac.createOscillator(), o2 = ac.createOscillator(), g2 = ac.createGain(), gn = ac.createGain(), dec = rnd(1.2, 2.6);
+      o.type = 'sine'; o.frequency.value = mtof(m); o2.type = 'triangle'; o2.frequency.value = mtof(m) * 2.005; g2.gain.value = 0.15;
+      gn.gain.setValueAtTime(0, t); gn.gain.linearRampToValueAtTime(rnd(0.025, 0.05), t + 0.006); gn.gain.setTargetAtTime(0, t + 0.02, dec / 3);
+      o.connect(gn); o2.connect(g2); g2.connect(gn); gn.connect(this.pingBus);
+      o.start(t); o2.start(t); o.stop(t + dec * 2); o2.stop(t + dec * 2);
+      events.push({ t, kind: 'ping', h: clamp((m - 60) / 26, 0, 1) });
+    }
+
+    tick(t) {
+      const src = ac.createBufferSource(); src.buffer = noiseBuf;
+      const hp = ac.createBiquadFilter(); hp.type = 'bandpass'; hp.frequency.value = rnd(3000, 7000); hp.Q.value = 3;
+      const gn = ac.createGain(); gn.gain.setValueAtTime(rnd(0.02, 0.05), t); gn.gain.exponentialRampToValueAtTime(0.0004, t + 0.03);
+      src.connect(hp); hp.connect(gn); gn.connect(this.pingBus); src.start(t, Math.random() * 1.5, 0.06);
+    }
+  }
+
+  /* ---------- a piece ---------- */
+  function newTrack(prevRoot) {
+    const root = prevRoot == null ? Math.floor(Math.random() * 12) : (prevRoot + pick([0, 7, 5, 5, 3, 9, 10, 2])) % 12;
+    const voicing = pick(VOICINGS);
+    let bassBase = 36 + root; if (bassBase > 43) bassBase -= 12;
+    const pat = new Array(16).fill(0); let n = 0;
+    while (n < 2) for (let s = 0; s < 16; s++) if (!pat[s] && chance(0.22)) { pat[s] = rnd(0.5, 1); n++; }
+    const breaks = new Set();
+    for (let k = 32; k < 200; k += 16) if (chance(0.22)) { const m = pick([4, 8, 8]); for (let i = 1; i <= m; i++) breaks.add(k - i); }
+    return {
+      root, base: root <= 5 ? 48 + root : 36 + root, bassBase, voicing,
+      mel: pick(MELS), melBars: pick([4, 8]), bass: pick(BASS),
+      padCut: rnd(380, 850), padLevel: rnd(0.85, 1.1), p1: rnd(9, 17), p2: rnd(23, 37),
+      hasPulse: chance(0.88), subPat: pick(SUBPATS), subDecay: rnd(0.14, 0.32), subLevel: rnd(0.75, 1),
+      pluck: chance(0.7) ? rnd(0.5, 1) : 0, pluckPat: pat, pluckNotes: [voicing[1], voicing[2], pick([14, 15, 19])],
+      pcut: rnd(350, 900), pdec: rnd(0.15, 0.45),
+      delaySteps: pick([3, 3, 6, 4]), fb: rnd(0.4, 0.58), fbTone: rnd(1200, 2600),
+      ping: rnd(0.015, 0.06), tick: chance(0.6) ? rnd(0.008, 0.04) : 0,
+      wind: chance(0.75) ? rnd(0.02, 0.05) : 0, windF: rnd(300, 1200), breaks
+    };
+  }
+  function plan() { curT = pick([12, 16, 24]); curL = pick([72, 88, 104, 120]); }
+
+  /* ---------- clock ---------- */
+  function onBar(bar, t, barDur) {
+    let c = decks[cur];
+    if (!c.track) { plan(); pieceNo = 1; c.load(newTrack(null), bar, t, 4, barDur, true); }
+    let rel = bar - c.startBar;
+    if (rel === curL) { c.end(t); cur = 1 - cur; c = decks[cur]; pieceNo++; plan(); rel = bar - c.startBar; }
+    const other = decks[1 - cur];
+    if (rel === curL - curT) { other.load(newTrack(c.track.root), bar, t, curT, barDur, false); c.beginOut(bar, t, curT, barDur); }
+    const key = KEYS[c.track.root] + ' min' + (other.track ? ' → ' + KEYS[other.track.root] + ' min' : '');
+    events.push({ t, kind: 'bar', bpm: bpmNow, key, piece: pieceNo, rel, L: curL, dur: barDur });
+  }
+  function tick() {
+    if (!playing || !ac || ac.state !== 'running') return;
+    const now = ac.currentTime;
+    if (nextTime < now) nextTime = now + 0.05;
+    const ahead = document.hidden ? 2.5 : 0.4;
+    while (nextTime < now + ahead) {
+      const el = nextTime - t0;
+      bpmNow = baseBpm + 1.5 * Math.sin(el / 170) + 0.8 * Math.sin(el / 71);
+      const sd = 60 / bpmNow / 4, bar = Math.floor(step / 16), s = step % 16;
+      if (s === 0) onBar(bar, nextTime, sd * 16);
+      decks[0].playStep(bar, s, nextTime, sd);
+      decks[1].playStep(bar, s, nextTime, sd);
+      nextTime += sd; step++;
+    }
+    if (events.length > 400) events.splice(0, events.length - 400);
+  }
+
+  /* ---------- start / stop ---------- */
+  /* a silent media element keeps the audio session alive on phones, so it goes on with the screen off */
+  function silentWav() {
+    const n = 4410, b = new Uint8Array(44 + n * 2), v = new DataView(b.buffer);
+    const w = (o, t) => { for (let i = 0; i < t.length; i++) b[o + i] = t.charCodeAt(i); };
+    w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true);
+    v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 44100, true); v.setUint32(28, 88200, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+    let t = ''; for (let i = 0; i < b.length; i++) t += String.fromCharCode(b[i]);
+    return 'data:audio/wav;base64,' + btoa(t);
+  }
+  function media(on) {
+    if (!('mediaSession' in navigator)) return;
+    try {
+      if (on) {
+        navigator.mediaSession.metadata = new MediaMetadata({ title: 'onde', artist: 'never-ending ambient, a little sad' });
+        navigator.mediaSession.setActionHandler('play', () => { if (!playing) start(); });
+        navigator.mediaSession.setActionHandler('pause', () => { if (playing) stop(); });
+        navigator.mediaSession.setActionHandler('stop', () => { if (playing) stop(); });
+      }
+      navigator.mediaSession.playbackState = on ? 'playing' : 'paused';
+    } catch (e) {}
+  }
+  const resumeSoon = (c, ms) => Promise.race([c.resume().then(() => true, () => false), new Promise(r => setTimeout(() => r(false), ms))]);
+  async function onReturn() {
+    if (document.hidden || !playing || !ac || ac.state === 'running') return;
+    const c = ac;
+    if (await resumeSoon(c, 400) && c.state === 'running') return;
+    if (playing && ac === c) stop();
+  }
+  document.addEventListener('visibilitychange', onReturn);
+  window.addEventListener('pageshow', onReturn); window.addEventListener('focus', onReturn);
+
+  function start() {
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+    ac = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'playback' });
+    ac.resume();
+    try {
+      silentEl = silentEl || new Audio(silentWav());
+      silentEl.loop = true; silentEl.setAttribute('playsinline', ''); silentEl.volume = 0.01;
+      silentEl.play().catch(() => {});
+    } catch (e) {}
+    media(true);
+    noiseBuf = makeNoise(2); crackleBuf = makeCrackle(6); irBuf = makeImpulse(7);
+    master = ac.createGain(); master.gain.value = 0;
+    const comp = ac.createDynamicsCompressor();
+    comp.threshold.value = -16; comp.knee.value = 14; comp.ratio.value = 3; comp.attack.value = 0.02; comp.release.value = 0.4;
+    mix = ac.createGain(); mix.gain.value = 1;
+    /* master tape: wow and flutter, saturation, a dull top */
+    tape = ac.createGain();
+    const td = ac.createDelay(0.2); td.delayTime.value = 0.03;
+    [[0.4, 0.001], [0.09, 0.0022], [6.8, 0.00005]].forEach(([f, d]) => {
+      const o = ac.createOscillator(), og = ac.createGain(); o.frequency.value = f; og.gain.value = d; o.connect(og); og.connect(td.delayTime); o.start();
+    });
+    const ts = ac.createWaveShaper(); ts.curve = tanhCurve(1.5, 0.8); ts.oversample = '2x';
+    const tl = ac.createBiquadFilter(); tl.type = 'lowpass'; tl.frequency.value = 7500; tl.Q.value = -3;
+    const th = ac.createBiquadFilter(); th.type = 'highpass'; th.frequency.value = 24; th.Q.value = 0.5;
+    mix.connect(tape); tape.connect(td); td.connect(ts); ts.connect(tl); tl.connect(th); th.connect(comp); comp.connect(master); master.connect(ac.destination);
+    master.gain.setTargetAtTime(0.9, ac.currentTime, 0.3);
+
+    bed = ac.createGain(); bed.connect(mix);
+    const src = (buf, off) => { const s = ac.createBufferSource(); s.buffer = buf; s.loop = true; s.start(0, off); return s; };
+    const flt = (type, f) => { const n = ac.createBiquadFilter(); n.type = type; n.frequency.value = f; return n; };
+    const lvl = v => { const n = ac.createGain(); n.gain.value = v; return n; };
+    { const f = flt('lowpass', 3600), l = lvl(0.03); src(noiseBuf, 0).connect(f); f.connect(l); l.connect(bed);
+      const o = ac.createOscillator(), og = lvl(0.011); o.frequency.value = 0.05; o.connect(og); og.connect(l.gain); o.start(); }
+    { const f = flt('highpass', 900), l = lvl(0.07); src(crackleBuf, 0).connect(f); f.connect(l); l.connect(bed); }
+    { const f = flt('lowpass', 140), l = lvl(0.16); src(noiseBuf, 0.7).connect(f); f.connect(l); l.connect(bed); }
+
+    decks = [new Deck(0), new Deck(1)]; cur = 0; step = 0; pieceNo = 0; events.length = 0;
+    baseBpm = rnd(52, 62); t0 = ac.currentTime; nextTime = t0 + 0.15;
+    playing = true;
+    try {
+      const code = "let i;onmessage=e=>{clearInterval(i);if(e.data==='go')i=setInterval(()=>postMessage(0),60)}";
+      worker = new Worker(URL.createObjectURL(new Blob([code], { type: 'text/javascript' })));
+      worker.onmessage = tick; worker.postMessage('go');
+    } catch (e) { worker = null; fallbackTimer = setInterval(tick, 60); }
+    tick();
+    ui(true);
+    wallStart = performance.now();
+    requestAnimationFrame(draw);
+  }
+  function stop() {
+    playing = false;
+    if (worker) { worker.postMessage('halt'); worker.terminate(); worker = null; }
+    clearInterval(fallbackTimer);
+    const old = ac; ac = null;
+    if (old) {
+      master.gain.setTargetAtTime(0, old.currentTime, 0.5);
+      setTimeout(() => old.close().catch(() => {}), 3000);
+    }
+    if (silentEl) silentEl.pause();
+    media(false);
+    events.length = 0;
+    ui(false);
+  }
+  const btn = $('toggle');
+  btn.addEventListener('click', () => (playing ? stop() : start()));
+
+  /* ---------- the porthole: one line for each voice, the floor at the bottom, pings as rings ---------- */
+  const cv = $('dial'), g = cv.getContext('2d');
+  const css = getComputedStyle(document.documentElement);
+  const col = n => css.getPropertyValue('--' + n).trim();
+  const INK = col('ink'), LINE = col('line'), AMBER = col('amber'), WINE = col('wine'), NIGHT = col('night');
+  const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const TAU = Math.PI * 2, TOP = -Math.PI / 2;
+  const REST = [{ h: 0.1, l: 0.5 }, { h: 0.32, l: 0.7 }, { h: 0.5, l: 0.4 }, { h: 0.68, l: 0.6, mel: true }, { h: 0.86, l: 0.35 }];
+  let S = 0, pings = [], pulse = 0, vis = null, wallStart = 0, lastSec = -1;
+
+  function ui(on) {
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.setAttribute('aria-label', on ? 'Stop' : 'Start');
+    $('tap').hidden = on; $('hint').hidden = on;
+    $('nowA').hidden = !on; $('nowB').hidden = !on; $('clock').hidden = !on;
+    if (on) { $('nowA').textContent = ' '; $('nowB').textContent = 'surfacing'; $('clock').textContent = '00:00:00'; lastSec = -1; }
+    else { vis = null; pings = []; pulse = 0; requestAnimationFrame(draw); }
+  }
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    S = cv.clientWidth; if (!S) return;
+    cv.width = cv.height = Math.round(S * dpr); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (!playing) draw();
+  }
+  function fmt(sec) {
+    const p = n => String(n).padStart(2, '0');
+    return p(Math.floor(sec / 3600)) + ':' + p(Math.floor(sec / 60) % 60) + ':' + p(sec % 60);
+  }
+  /* h: 0 at the bottom, 1 at the top; l: how present the voice is */
+  function wave(h, l, alpha, color, seed, time) {
+    const c = S / 2, R = S * 0.46, y0 = c + R * 0.5 - h * R * 1.05, amp = 2 + S * 0.03 * l;
+    g.globalAlpha = alpha; g.strokeStyle = color; g.lineWidth = 1 + l * 0.8;
+    g.beginPath();
+    for (let x = c - R; x <= c + R; x += 4) {
+      const u = (x - c) / R;
+      const y = y0 + amp * Math.sin(u * (2.2 + seed % 3) + time * (0.08 + (seed % 5) * 0.012) + seed) + amp * 0.4 * Math.sin(u * 5.3 - time * 0.05 + seed * 2);
+      x === c - R ? g.moveTo(x, y) : g.lineTo(x, y);
+    }
+    g.stroke();
+  }
+  function draw() {
+    const wall = performance.now(), c = S / 2, R0 = S * 0.46;
+    let now = 0, phase = 0;
+    if (playing && ac) {
+      now = ac.currentTime - (ac.outputLatency || 0);
+      while (events.length && events[0].t <= now) {
+        const e = events.shift();
+        if (e.kind === 'pulse') pulse = Math.max(pulse, e.vel);
+        else if (e.kind === 'ping') pings.push({ born: wall, x: rnd(-0.6, 0.6), h: e.h });
+        else if (e.kind === 'bar') {
+          vis = e;
+          $('nowA').textContent = e.key;
+          $('nowB').textContent = 'piece ' + e.piece + ', bar ' + (e.rel + 1) + ' of ' + e.L + ' at ' + Math.round(e.bpm) + ' bpm';
+        }
+      }
+      if (vis && !still) phase = clamp((now - vis.t) / vis.dur, 0, 1);
+      const sec = Math.floor((wall - wallStart) / 1000);
+      if (sec !== lastSec) { lastSec = sec; $('clock').textContent = fmt(sec); }
+    }
+    const time = still ? 0 : wall / 1000;
+    g.clearRect(0, 0, S, S);
+    g.save();
+    g.beginPath(); g.arc(c, c, R0 - 1, 0, TAU); g.clip();
+
+    /* the deep: a glow that comes up from the bottom with every pulse */
+    const grad = g.createRadialGradient(c, c + R0 * 0.9, 0, c, c + R0 * 0.9, R0 * 1.5);
+    grad.addColorStop(0, NIGHT); grad.addColorStop(1, 'rgba(74,140,196,0)');
+    g.globalAlpha = 0.1 + 0.22 * pulse + (playing ? 0.05 : 0); g.fillStyle = grad; g.fillRect(0, 0, S, S);
+
+    if (playing && decks.length) {
+      for (let d = 0; d < 2; d++) {
+        const dk = decks[d]; if (!dk.track) continue;
+        const lvl = clamp(dk.out.gain.value, 0, 1);
+        dk.voices.forEach((v, k) => {
+          const l = now > v.ts ? 0.5 + 0.5 * Math.sin(TAU * (now - v.ts) / v.per) : 0.5;
+          wave(clamp((v.n + 12) / 36, 0, 1), l, (0.1 + 0.6 * l) * lvl, v.mel ? WINE : INK, d * 7 + k * 3 + 1, time);
+        });
+      }
+    } else REST.forEach((v, k) => wave(v.h, v.l, 0.12 + 0.3 * v.l, v.mel ? WINE : INK, k * 3 + 1, 0));
+
+    /* the floor, pushed by the pulse */
+    const fy = c + R0 * 0.72;
+    g.globalAlpha = 0.25 + 0.5 * pulse; g.strokeStyle = NIGHT; g.lineWidth = 1.5;
+    g.beginPath();
+    for (let x = c - R0; x <= c + R0; x += 4) {
+      const u = (x - c) / R0, y = fy - S * 0.045 * pulse * Math.exp(-u * u * 7);
+      x === c - R0 ? g.moveTo(x, y) : g.lineTo(x, y);
+    }
+    g.stroke();
+
+    /* pings open like rings on water */
+    pings = pings.filter(p => wall - p.born < 5000);
+    if (!still) for (const p of pings) {
+      const age = (wall - p.born) / 5000;
+      g.globalAlpha = 0.7 * (1 - age) * (1 - age); g.strokeStyle = AMBER; g.lineWidth = 1;
+      g.beginPath(); g.ellipse(c + p.x * R0, c + R0 * 0.4 - p.h * R0 * 0.9, 3 + age * S * 0.09, 1.5 + age * S * 0.03, 0, 0, TAU); g.stroke();
+    }
+    g.restore();
+
+    g.globalAlpha = 1; g.strokeStyle = LINE; g.lineWidth = 1.5; g.beginPath(); g.arc(c, c, R0, 0, TAU); g.stroke();
+    if (playing && vis) {
+      g.strokeStyle = AMBER; g.globalAlpha = 0.9;
+      g.beginPath(); g.arc(c, c, R0, TOP, TOP + TAU * Math.min(1, (vis.rel + phase) / vis.L)); g.stroke();
+      const a = TOP + TAU * phase;
+      g.fillStyle = WINE; g.globalAlpha = 1; g.beginPath(); g.arc(c + R0 * Math.cos(a), c + R0 * Math.sin(a), 3.5, 0, TAU); g.fill();
+    }
+    g.globalAlpha = 1;
+    pulse *= 0.94;
+    if (playing || pings.length || pulse > 0.01) requestAnimationFrame(draw);
+  }
+  /* ---------- behind everything: a window, the rain and an empty chair, sketched loosely in pen ---------- */
+  const bc = $('room'), b2 = bc.getContext('2d'), MUTE = col('mute');
+  let bs = 1, bw = 0, bh = 0, boil = 1, bticks = 0, rs = 1, rain = 0;
+  const rr = () => { rs |= 0; rs = rs + 0x6D2B79F5 | 0; let t = Math.imul(rs ^ rs >>> 15, 1 | rs); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const jt = a => (rr() - 0.5) * 2 * a;
+  const hsh = n => { const x = Math.sin(n * 91.7) * 43758.5453; return x - Math.floor(x); };
+  const pen = (c, a) => { b2.strokeStyle = c; b2.globalAlpha = a; };
+  /* a pen line: drawn twice, never quite straight, overshooting its ends */
+  function pl(x1, y1, x2, y2, wob) {
+    const w = wob == null ? 2.2 : wob, len = Math.hypot(x2 - x1, y2 - y1) || 1, ux = (x2 - x1) / len, uy = (y2 - y1) / len;
+    for (let p = 0; p < 2; p++) {
+      const o1 = rr() * 5 - 1, o2 = rr() * 5 - 1;
+      const ax = x1 - ux * o1 + jt(w), ay = y1 - uy * o1 + jt(w), bx = x2 + ux * o2 + jt(w), by = y2 + uy * o2 + jt(w);
+      const mx = (ax + bx) / 2 - uy * jt(w * 1.8 + len * 0.012), my = (ay + by) / 2 + ux * jt(w * 1.8 + len * 0.012);
+      b2.beginPath(); b2.moveTo(ax, ay); b2.quadraticCurveTo(mx, my, bx, by); b2.stroke();
+    }
+  }
+  function pc(cx, cy, r) {
+    for (let p = 0; p < 2; p++) {
+      const a0 = rr() * 6.28, turn = 6.28 * (1.04 + rr() * 0.14), n = 18; b2.beginPath();
+      for (let i = 0; i <= n; i++) { const a = a0 + turn * i / n, x = cx + jt(0.6) + Math.cos(a) * r, y = cy + jt(0.6) + Math.sin(a) * r; i ? b2.lineTo(x, y) : b2.moveTo(x, y); }
+      b2.stroke();
+    }
+  }
+  function box(x, y, w, h) { pl(x, y, x + w, y); pl(x + w, y, x + w, y + h); pl(x + w, y + h, x, y + h); pl(x, y + h, x, y); }
+  function curve(x1, y1, c1x, c1y, c2x, c2y, x2, y2) {
+    for (let p = 0; p < 2; p++) {
+      b2.beginPath(); b2.moveTo(x1 + jt(2), y1 + jt(2));
+      b2.bezierCurveTo(c1x + jt(6), c1y + jt(6), c2x + jt(6), c2y + jt(6), x2 + jt(2), y2 + jt(2)); b2.stroke();
+    }
+  }
+  function sketch() {
+    if (!bw) return;
+    rs = boil * 7919;
+    b2.setTransform(1, 0, 0, 1, 0, 0); b2.clearRect(0, 0, bc.width, bc.height);
+    const dpr = bc.width / bw;
+    b2.setTransform(dpr * bs, 0, 0, dpr * bs, dpr * (bw - 900 * bs) / 2, dpr * (bh - 300 * bs));
+    b2.lineWidth = 1.15 / bs; b2.lineCap = 'round'; b2.lineJoin = 'round';
+
+    /* the rain, seen through the glass */
+    b2.save(); b2.beginPath(); b2.rect(154, 34, 232, 172); b2.clip();
+    pen(NIGHT, 0.5);
+    for (let k = 0; k < 34; k++) {
+      const sp = 60 + hsh(k) * 70, len = 9 + hsh(k + 50) * 12;
+      const y = 20 + ((rain * sp + hsh(k + 9) * 200) % 200), x = 150 + hsh(k + 3) * 244 + Math.floor((rain * sp + hsh(k + 9) * 200) / 200) % 7 * 5;
+      b2.beginPath(); b2.moveTo(x, y); b2.lineTo(x - len * 0.2, y + len); b2.stroke();
+    }
+    /* a street lamp, far away, that the pulse makes stronger */
+    pen(MUTE, 0.2);   /* the roofs across the street */
+    [[158, 182, 204, 180], [204, 180, 204, 160], [204, 160, 222, 148], [222, 148, 240, 160], [240, 160, 240, 176], [240, 176, 296, 178], [296, 178, 296, 166], [296, 166, 330, 165], [330, 165, 330, 180], [330, 180, 384, 181]]
+      .forEach(q => pl(q[0], q[1], q[2], q[3], 0.8));
+    pen(MUTE, 0.3); pl(352, 181, 351, 70, 0.7); curve(351, 70, 350, 56, 330, 54, 322, 60); pl(315, 61, 329, 60, 0.5);
+    pen(AMBER, 0.65 + 0.35 * pulse); pc(322, 65, 3);
+    pen(AMBER, 0.14 + 0.3 * pulse); pc(322, 66, 10); pc(322, 67, 17);
+    b2.restore();
+
+    pen(MUTE, 0.3);
+    /* the floor */
+    pl(-200, 262, 1100, 260, 2.5); pl(-80, 272, 700, 273, 2.5);
+    /* the window */
+    box(150, 30, 240, 180); box(158, 38, 224, 164);
+    pl(270, 38, 270, 202); pl(158, 118, 382, 120);
+    pl(138, 212, 402, 211); pl(142, 220, 398, 219);
+    /* the curtain, pulled to one side */
+    pl(120, 20, 420, 18, 1.5);
+    curve(128, 22, 120, 90, 136, 160, 122, 246); curve(142, 22, 150, 80, 132, 170, 140, 244); curve(156, 22, 146, 100, 160, 150, 152, 240);
+    curve(122, 246, 134, 250, 144, 240, 152, 240);
+    /* the empty chair, turned towards the window */
+    pl(470, 206, 544, 204); pl(472, 214, 542, 212);
+    pl(474, 206, 471, 262); pl(542, 204, 548, 262); pl(540, 204, 546, 124); pl(548, 204, 553, 126);
+    pl(536, 128, 558, 126); pl(476, 240, 544, 238, 1.5);
+    /* something left on it */
+    pen(WINE, 0.5); curve(546, 136, 566, 144, 562, 184, 556, 212); curve(540, 138, 560, 150, 554, 190, 550, 214);
+  }
+  function roomSize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    bw = window.innerWidth; bs = Math.min(bw * 0.98 / 900, window.innerHeight * 0.34 / 300, 1.3); bh = Math.ceil(300 * bs);
+    bc.style.height = bh + 'px'; bc.width = Math.round(bw * dpr); bc.height = Math.round(bh * dpr);
+    sketch();
+  }
+  window.addEventListener('resize', roomSize);
+  roomSize();
+  if (!still) setInterval(() => {
+    if (document.hidden) return;
+    bticks++; if (bticks % 9 === 0) boil++;          /* the line "boils": it is redrawn a little differently now and then */
+    if (playing) rain += 0.1;
+    if (playing || bticks % 9 === 0) sketch();
+  }, 100);
+
+  window.addEventListener('resize', resize);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(resize);
+  resize();
+})();
+</script>
+<script data-goatcounter="https://phonk.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>
